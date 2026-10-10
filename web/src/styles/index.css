@@ -10,26 +10,27 @@
 /* Platform default tokens (marketplace). Stores & dashboard override these via the Theme Engine. */
 /* Banha Outfit brand tokens (marketplace + platform screens).
    Orange is the brand colour but is NOT used as text on white (3.1:1) — buttons are orange with
-   near-black labels (6:1), and "brand ink" (#B23708, 6.1:1) is the orange used for text/links. */
+   near-black labels (6:1), and "brand ink" (#C83705, 5:1) is the orange used for text/links. */
 :root {
-  --c-background: 255 255 255;
-  --c-surface: 247 243 237;
+  --c-background: 255 249 242;
+  --c-surface: 255 240 227;
   --c-elevated: 255 255 255;
   --c-text: 17 17 17;
-  --c-muted: 85 85 85;
-  --c-border: 229 224 216;
-  --c-border-strong: 190 184 175;
+  --c-muted: 94 84 76;
+  --c-border: 240 226 211;
+  --c-border-strong: 214 193 172;
   --c-primary: 255 90 31;
   --c-on-primary: 17 17 17;
-  --c-primary-ink: 178 55 8;
-  --c-secondary: 255 237 224;
+  --c-primary-ink: 200 55 5;
+  --c-display: 242 78 18;
+  --c-secondary: 255 229 210;
   --c-on-secondary: 17 17 17;
   --c-accent: 255 90 31;
   --c-on-accent: 17 17 17;
   --c-button: 255 90 31;
   --c-on-button: 17 17 17;
   --c-button-outline: 214 66 12;
-  --c-header: 255 255 255;
+  --c-header: 255 249 242;
   --c-on-header: 17 17 17;
   --c-footer: 17 17 17;
   --c-on-footer: 255 246 236;

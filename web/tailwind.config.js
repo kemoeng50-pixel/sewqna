@@ -19,6 +19,7 @@ export default {
         primary: v('primary'),
         'on-primary': v('on-primary'),
         brand: v('primary-ink'),
+        display: v('display'),
         secondary: v('secondary'),
         'on-secondary': v('on-secondary'),
         accent: v('accent'),

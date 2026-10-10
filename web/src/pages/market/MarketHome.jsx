@@ -93,14 +93,14 @@ export default function MarketHome() {
 
       {/* hero */}
       <section className="container grid items-center gap-12 pb-16 pt-8 sm:pt-14 lg:grid-cols-2 lg:gap-8 lg:pb-24 lg:pt-16">
-        <div className="max-w-xl">
+        <div className="min-w-0 max-w-xl">
           <motion.p initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="inline-flex items-center gap-2 rounded-full bg-secondary px-3.5 py-1.5 text-[13px] font-semibold text-brand">
             <Sparkles className="h-3.5 w-3.5" />{t('market.heroEyebrow')}
           </motion.p>
           <h1 className="mt-5 font-display text-[clamp(2.3rem,1.4rem+3.8vw,4.4rem)] font-bold leading-[1.04]">
             {titleLines.map((l, i) => (
               <motion.span key={i} className="block" initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.08 + i * 0.1, duration: 0.7, ease: [0.22, 1, 0.36, 1] }}>
-                {i === titleLines.length - 1 ? <span className="text-brand">{l}</span> : l}
+                {i === titleLines.length - 1 ? <span className="text-display">{l}</span> : l}
               </motion.span>
             ))}
           </h1>
@@ -122,15 +122,18 @@ export default function MarketHome() {
       <div className="container"><Why /></div>
 
       {/* featured */}
-      <section className="container mt-20">
+      <section className="mt-14 border-y border-line bg-elevated">
+       <div className="container py-12 sm:py-14">
         <div className="mb-8 flex items-end justify-between"><h2 className="font-display text-display-sm font-bold">{t('market.featuredStores')}</h2></div>
         <div className="grid gap-5 md:grid-cols-2 lg:gap-6">
           {!base ? [0, 1].map((i) => <StoreCardSkeleton key={i} large />) : featured.slice(0, 2).map((s, i) => <StoreCard key={s.id} store={s} index={i} large />)}
         </div>
+      </div>
       </section>
 
       {/* trending products across stores */}
-      <section className="container mt-20">
+      <section className="border-b border-line bg-secondary/50">
+       <div className="container py-12 sm:py-14">
         <h2 className="mb-8 font-display text-display-sm font-bold">{t('market.trending')}</h2>
         <div className="scroll-x -mx-4 gap-3 px-4 pb-2 sm:gap-5">
           {!base ? Array.from({ length: 5 }, (_, i) => <div key={i} className="w-[46%] shrink-0 sm:w-[30%] lg:w-[22%] xl:w-[18%]"><ProductCardSkeleton /></div>) :
@@ -140,10 +143,12 @@ export default function MarketHome() {
               </div>
             ))}
         </div>
+       </div>
       </section>
 
       {/* all stores with filters */}
-      <section id="stores" className="container mt-20 scroll-mt-20">
+      <section id="stores" className="scroll-mt-20 border-b border-line bg-elevated">
+       <div className="container py-12 sm:py-14">
         <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <h2 className="font-display text-display-sm font-bold">{t('market.allStores')}</h2>
           <div className="flex flex-col gap-3 sm:flex-row">
@@ -174,10 +179,11 @@ export default function MarketHome() {
         ) : (
           <EmptyState icon={Store} title={t('market.noStores')} body={t('market.noStoresBody')} action={<Button variant="outline" onClick={() => { setTerm(''); setCategory('all'); }}>{t('common.clearAll')}</Button>} />
         )}
+       </div>
       </section>
 
       {/* owner CTA */}
-      <section className="container mt-24">
+      <section className="container mt-16">
         <div className="relative overflow-hidden rounded-[32px] bg-[#111111] px-6 py-12 text-white sm:px-12 sm:py-16 lg:grid lg:grid-cols-2 lg:items-center lg:gap-12">
           <div className="pointer-events-none absolute -end-24 -top-24 h-80 w-80 rounded-full bg-[#FF5A1F]/20 blur-3xl" />
           <div className="relative">
@@ -199,7 +205,7 @@ export default function MarketHome() {
         </div>
       </section>
 
-      <footer className="container mt-20 flex flex-col items-center justify-between gap-4 border-t border-line py-10 text-sm text-muted sm:flex-row">
+      <footer className="container mt-16 flex flex-col items-center justify-between gap-4 border-t border-line py-10 text-sm text-muted sm:flex-row">
         <Brand />
         <p>© {new Date().getFullYear()} {t('market.footer')}</p>
       </footer>

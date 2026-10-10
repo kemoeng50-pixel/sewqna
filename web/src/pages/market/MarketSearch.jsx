@@ -43,7 +43,7 @@ export default function MarketSearch() {
     <div className="min-h-dvh">
       <MarketHeader />
       <main className="container pb-20 pt-4 sm:pt-8">
-        <div className="max-w-2xl" key={q}><MarketSearchBar initial={q} autoFocus={!q && !department} /></div>
+        <div className="max-w-2xl" key={q}><MarketSearchBar initial={q} autoFocus={!q && !department} chips={false} /></div>
 
         <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="scroll-x -mx-4 gap-2 px-4 sm:mx-0 sm:flex-wrap sm:px-0" role="tablist" aria-label={t('settings.departments')}>
@@ -71,7 +71,7 @@ export default function MarketSearch() {
             {page < (data.pages || 1) && <div className="mt-10 text-center"><Button variant="outline" size="lg" loading={busy} onClick={loadMore}>{t('common.loadMore')}</Button></div>}
           </>
         ) : (
-          <EmptyState icon={SearchX} title={t('search.noResults')} body={t('search.noResultsBody')} action={<Button variant="outline" onClick={() => setParams({}, { replace: true })}>{t('common.clearAll')}</Button>} />
+          <EmptyState icon={SearchX} title={q ? t('search.noResultsFor', { q }) : t('search.noResults')} body={q ? t('search.noResultsForBody') : t('search.noResultsBody')} action={<Button variant="outline" onClick={() => setParams({}, { replace: true })}>{t('common.clearAll')}</Button>} />
         )}
       </main>
       <footer className="container flex items-center justify-between border-t border-line py-8 text-sm text-muted"><Brand /><p>© {new Date().getFullYear()} {t('market.footer')}</p></footer>

@@ -13,8 +13,8 @@ import { mediaMap, processImage } from '../lib/media.js';
 import { sameDaySql } from '../lib/sameDay.js';
 import { buyerFromReq } from '../lib/buyers.js';
 import { recomputeRatings } from '../lib/reviews.js';
-import { searchByImage, visualSettings } from '../lib/visual.js';
-import { runStylist, stylistSettings, lookOfDay, cardsByIds } from '../lib/stylist.js';
+import { searchByImage, visualSettings, VisualProviderError } from '../lib/visual.js';
+import { runStylist, stylistSettings, publicStylistStarterPrompts, lookOfDay, cardsByIds } from '../lib/stylist.js';
 import { quote } from '../lib/cart.js';
 import { notifyStore } from '../lib/push.js';
 import { sendNewOrderAlert, notifyPlatformDelivery } from '../lib/whatsapp.js';
@@ -112,7 +112,11 @@ r.post('/visual-search', photoUpload.single('file'), h(async (req, res) => {
   if (!req.file) throw new AppError(422, 'validation_failed', 'Pick a photo.', { file: 'required' });
   const department = String(req.body?.department || '').replace(/[^a-z0-9_]/g, '');
   let top;
-  try { top = await searchByImage(req.file.buffer, { department, limit: 24 }); } catch { throw new AppError(400, 'invalid_image', 'This file is not a supported image.'); }
+  try { top = await searchByImage(req.file.buffer, { department, limit: 24 }); }
+  catch (e) {
+    if (e instanceof VisualProviderError) throw new AppError(503, 'visual_provider_unavailable', 'Visual search is temporarily unavailable.');
+    throw new AppError(400, 'invalid_image', 'This file is not a supported image.');
+  }
   if (!top.length) return res.json({ items: [], total: 0 });
   const rows = q.all(
     `SELECT p.*, s.slug AS store_slug, s.name_ar AS store_name_ar, s.name_en AS store_name_en FROM products p JOIN stores s ON s.id=p.store_id WHERE p.id IN (${top.map(() => '?').join(',')})`, top.map((t) => t.id));
@@ -124,10 +128,11 @@ r.post('/visual-search', photoUpload.single('file'), h(async (req, res) => {
 
 /* ---------------------------------------------------------- stylist chat ("مودة") */
 const chatHits = new Map();
+const stylistFeedbackHits = new Map();
 r.post('/stylist', h(async (req, res) => {
   const st = stylistSettings();
   if (!st.enabled) throw new AppError(503, 'stylist_disabled', 'The stylist is switched off.');
-  const body = z.object({ messages: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string().max(700) })).min(1).max(30), image: z.string().max(950000).optional(), image2: z.string().max(950000).optional(), profile: z.record(z.string().max(100)).optional() }).parse(req.body);
+  const body = z.object({ messages: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string().max(700) })).min(1).max(30), image: z.string().max(950000).optional(), image2: z.string().max(950000).optional(), profile: z.record(z.string().max(100)).optional(), starterPromptId: z.string().regex(/^[a-zA-Z0-9_-]{1,48}$/).optional() }).parse(req.body);
   if (body.messages[body.messages.length - 1].role !== 'user') throw new AppError(422, 'validation_failed', 'Last message must be from the shopper.');
   const ip = req.ip || 'x'; const now = Date.now();
   const recent = (chatHits.get(ip) || []).filter((t) => now - t < 86400e3);
@@ -140,8 +145,22 @@ r.post('/stylist', h(async (req, res) => {
     const owned = q.all("SELECT oi.name_ar, oi.color FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE o.buyer_id=? AND o.status='delivered' ORDER BY o.id DESC LIMIT 8", [me.id]);
     if (owned.length) profile = { ...(profile || {}), owns: owned.map((x) => [x.name_ar, x.color].filter(Boolean).join(' ')).join('، ').slice(0, 300), ...(me.name ? { name: me.name.split(' ')[0] } : {}) };
   }
-  try { res.json(await runStylist(body.messages, { image: body.image, image2: body.image2, profile })); }
+  try { res.json(await runStylist(body.messages, { image: body.image, image2: body.image2, profile, starterPromptId: body.starterPromptId })); }
   catch (e) { if (e.code === 'stylist_no_vision') throw new AppError(422, 'stylist_no_vision', 'Photos need the Anthropic provider.'); if (e.code === 'stylist_bad_image') throw new AppError(422, 'stylist_bad_image', 'Unsupported image.'); if (e.code === 'stylist_unavailable') throw new AppError(503, 'stylist_unavailable', 'The stylist is unavailable right now.'); throw e; }
+}));
+
+// Shopper reports help the admin curate corrections; this is a review queue, not direct model training.
+r.post('/stylist/feedback', h((req, res) => {
+  const body = z.object({ userMessage: z.string().trim().min(1).max(700), assistantResponse: z.string().trim().min(1).max(1200), productIds: z.array(z.number().int().positive()).max(24).default([]) }).parse(req.body);
+  const ip = req.ip || 'x'; const now = Date.now();
+  const recent = (stylistFeedbackHits.get(ip) || []).filter((t) => now - t < 86400e3);
+  if (recent.length >= 30 || recent.filter((t) => now - t < 3600e3).length >= 10) throw new AppError(429, 'rate_limited', 'Too many reports, try again later.');
+  stylistFeedbackHits.set(ip, [...recent, now]);
+  const scrub = (s) => String(s).replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[email]').replace(/(?:\+?20|0020)?\s?01[0125][0-9\s-]{8,12}/g, '[phone]').slice(0, 1200);
+  const ids = [...new Set(body.productIds)];
+  const products = ids.length ? q.all(`SELECT p.id,p.name_ar,p.name_en,p.department,c.name_ar AS category_ar FROM products p LEFT JOIN categories c ON c.id=p.category_id WHERE p.id IN (${ids.map(() => '?').join(',')})`, ids) : [];
+  const result = q.run('INSERT INTO stylist_feedback (user_message,assistant_response,products_json) VALUES (?,?,?)', [scrub(body.userMessage), scrub(body.assistantResponse), JSON.stringify(products)]);
+  res.status(201).json({ ok: true, id: Number(result.lastInsertRowid) });
 }));
 
 r.post('/look-share', h(async (req, res) => {
@@ -222,7 +241,7 @@ r.get('/marketplace', h((req, res) => {
   const deptRails = departments.filter((d) => d.products >= 3).sort((a, b) => b.products - a.products).slice(0, 4)
     .map((d) => ({ slug: d.slug, name: d.name, items: railRows('AND p.department=? ORDER BY p.sold_count DESC, p.id DESC LIMIT 10', [d.slug]) }));
   cache(res, 60);
-  res.json({ stores: rows.map((s) => serializeStore(s)), categories, stats, trending, newest, deals, departments, deptRails, features: { visual: visualSettings().enabled, stylist: stylistSettings().enabled, stylistName: stylistSettings().name, stylistAvatar: stylistSettings().avatar || null } });
+  res.json({ stores: rows.map((s) => serializeStore(s)), categories, stats, trending, newest, deals, departments, deptRails, features: { visual: visualSettings().enabled, stylist: stylistSettings().enabled, stylistName: stylistSettings().name, stylistAvatar: stylistSettings().avatar || null, stylistPrompts: publicStylistStarterPrompts() } });
 }));
 
 /* ---------------------------------------------------------- storefront */

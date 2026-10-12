@@ -138,11 +138,13 @@ Each store picks one or many departments (women, men, kids, shoes, bags, hijab, 
 ## Pre-launch security & operations
 
 1. **Secrets**: set `JWT_SECRET` (32+ random chars), `ADMIN_KEY` (16+ chars) and `NODE_ENV=production`. The admin “النظام” page shows a live checklist.
-2. **Admin two-step confirmation**: run `npm run admin-totp -w server`, put the printed `ADMIN_TOTP_SECRET` in the host’s env, and add the same secret to an authenticator app (Google/Microsoft Authenticator). After that, admin sign-in = key + 6-digit code (12-hour session; codes can’t be replayed; wrong codes are rate-limited).
+2. **Admin two-step confirmation (optional)**: sign-in uses `ADMIN_KEY` alone by default. To enable a second step later, run `npm run admin-totp -w server`, put the printed `ADMIN_TOTP_SECRET` in the host’s env, add the same secret to an authenticator app (Google/Microsoft Authenticator), then switch it on in admin → النظام → أمان دخول الأدمن. Once enabled, sign-in requires the key and a 6-digit code.
 3. **Backups**: set `BACKUP_DIR` to a folder on a persistent disk. The server then snapshots the database (consistent `VACUUM INTO`) and mirrors new photos every 24 h and keeps `BACKUP_KEEP_DAYS` daily DB copies. Run on demand with `npm run backup -w server`. The admin “النظام” page can also download the database. Keep an off-server copy as well. Restore: stop the server, copy `db/souqna-DATE.db` over `DB_FILE` and `media/` over `MEDIA_DIR`.
 4. **Demo passwords**: the seed now generates a random Town Style password (printed at the end of the seed). On an existing database run `npm run set-password -w server -- townstyle@banhalook.app` (prints a new random password). Set the store’s real phone from the admin Stores page.
 5. **Push notifications** need HTTPS (the PWA service worker does too). VAPID keys are created automatically on first run.
 
-## Photo storage on Cloudflare R2 (free 10 GB)
+## Photo storage on Cloudflare R2
 
 Set `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_PUBLIC_URL` and every new photo is uploaded to R2 (the volume keeps only the database). Photos already on the volume keep working; move them with `npm run media:to-r2 -w server` (safe to re-run, frees the disk space). Deleting a photo or a store also deletes it from R2.
+
+The admin System page can show the server filesystem capacity and Cloudflare R2 account storage. To enable the R2 metric, set `CF_R2_METRICS_TOKEN` to a Cloudflare API token with R2 read access and set `CF_ACCOUNT_ID` (or reuse `R2_ACCOUNT_ID`). This metric covers all buckets on the account and may lag. Cloudflare's included 10 GB-month is a billing allowance, not a hard storage cap; billing uses average storage over the month. The server disk number is the filesystem mounted where the database lives; compare it with your Railway/Render volume allocation in that provider's dashboard.

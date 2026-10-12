@@ -232,6 +232,30 @@ CREATE TABLE IF NOT EXISTS app_settings (
   value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS stylist_training_examples (
+  id INTEGER PRIMARY KEY,
+  user_message TEXT NOT NULL,
+  bad_response TEXT NOT NULL,
+  corrected_response TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  topic TEXT NOT NULL DEFAULT 'other',
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_stylist_training_active ON stylist_training_examples(active, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS stylist_feedback (
+  id INTEGER PRIMARY KEY,
+  user_message TEXT NOT NULL,
+  assistant_response TEXT NOT NULL,
+  products_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','dismissed','trained')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  reviewed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_stylist_feedback_queue ON stylist_feedback(status, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   id INTEGER PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

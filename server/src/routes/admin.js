@@ -12,8 +12,8 @@ import { h, AppError } from '../lib/errors.js';
 import { listDepartments, assertDepartments } from '../lib/departments.js';
 import ownerRoutes from './owner.js';
 import { purgeMediaFiles } from '../lib/media.js';
-import { visualStatus, saveVisualSettings } from '../lib/visual.js';
-import { stylistStatus, saveStylistSettings } from '../lib/stylist.js';
+import { visualStatus, saveVisualSettings, triggerReindex } from '../lib/visual.js';
+import { stylistStatus, saveStylistSettings, stylistStarterPrompts, saveStylistStarterPrompts, stylistStyleGuide, saveStylistStyleGuide, stylistStyleGuideSources, listStylistTraining, createStylistTrainingExample, updateStylistTrainingExample, setStylistTrainingExampleActive, deleteStylistTrainingExample, listStylistFeedback, dismissStylistFeedback, trainFromStylistFeedback } from '../lib/stylist.js';
 import { saveDeptImage, removeDeptImage, saveStylistAvatar } from '../lib/deptImage.js';
 import { notifyOrderStatus } from '../lib/buyers.js';
 import { serializeStore } from '../lib/serialize.js';
@@ -37,7 +37,13 @@ const r = Router();
 
 const failed = new Map();
 const SESSION_MS = 12 * 3600e3;
-const sign = (exp) => crypto.createHmac('sha256', `${config.jwtSecret}|${config.adminKey}|${config.adminTotpSecret}`).update(`admin-session:${exp}`).digest('base64url');
+const appSetting = (key) => q.get('SELECT value FROM app_settings WHERE key=?', [key])?.value || '';
+const twoStepEnabled = () => !!config.adminTotpSecret && appSetting('admin_totp_enabled') === '1';
+const sessionEpoch = () => Number(appSetting('admin_session_epoch')) || 0;
+const setAppSetting = (key, value) => q.run('INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [key, String(value)]);
+const bumpSessionEpoch = () => setAppSetting('admin_session_epoch', sessionEpoch() + 1);
+const adminSecurityStatus = () => ({ twoStepConfigured: !!config.adminTotpSecret, twoStepEnabled: twoStepEnabled() });
+const sign = (exp) => crypto.createHmac('sha256', `${config.jwtSecret}|${config.adminKey}|${config.adminTotpSecret}|${sessionEpoch()}`).update(`admin-session:${exp}`).digest('base64url');
 const makeSession = () => { const exp = Date.now() + SESSION_MS; return `${exp}.${sign(exp)}`; };
 const validSession = (tok) => {
   const [exp, mac] = String(tok || '').split('.');
@@ -54,7 +60,7 @@ r.use((req, _res, next) => {
     failed.set(req.ip, [...recent, Date.now()]);
     return next(new AppError(401, 'unauthorized', 'Wrong admin key.'));
   }
-  if (config.adminTotpSecret && req.path !== '/login' && !validSession(req.headers['x-admin-session'])) {
+  if (twoStepEnabled() && req.path !== '/login' && !validSession(req.headers['x-admin-session'])) {
     return next(new AppError(401, 'totp_required', 'Two-step confirmation required.'));
   }
   next();
@@ -63,7 +69,7 @@ r.use((req, _res, next) => {
 /** Step 2 of admin sign-in. The key (checked above) + a 6-digit authenticator code → a 12-hour session proof. */
 let lastStep = 0;
 r.post('/login', h((req, res) => {
-  if (!config.adminTotpSecret) return res.json({ session: null, twoStep: false });
+  if (!twoStepEnabled()) return res.json({ session: null, twoStep: false });
   const { code } = z.object({ code: z.string().max(12).optional() }).parse(req.body || {});
   if (!code) throw new AppError(401, 'totp_required', 'Two-step confirmation required.');
   const recent = (failed.get(`t:${req.ip}`) || []).filter((t) => Date.now() - t < 10 * 60e3);
@@ -75,6 +81,28 @@ r.post('/login', h((req, res) => {
   }
   lastStep = step;
   res.json({ session: makeSession(), twoStep: true });
+}));
+
+/** Admin can keep sign-in simple for now, then require an authenticator code when ready. */
+r.put('/security/two-step', h((req, res) => {
+  const body = z.object({ enabled: z.boolean(), code: z.string().length(6).optional() }).parse(req.body || {});
+  const wasEnabled = twoStepEnabled();
+  if (body.enabled === wasEnabled) return res.json({ ...adminSecurityStatus(), session: body.enabled ? makeSession() : null });
+  if (body.enabled) {
+    if (!config.adminTotpSecret) throw new AppError(409, 'totp_not_configured', 'Set ADMIN_TOTP_SECRET before enabling two-step confirmation.');
+    if (!body.code) throw new AppError(422, 'totp_code_required', 'Enter the six-digit authenticator code.');
+    const recent = (failed.get(`t:${req.ip}`) || []).filter((t) => Date.now() - t < 10 * 60e3);
+    if (recent.length >= 6) throw new AppError(429, 'too_many_attempts', 'Too many wrong codes. Wait a few minutes.');
+    const step = verifyTotp(config.adminTotpSecret, body.code);
+    if (step == null || step <= lastStep) {
+      failed.set(`t:${req.ip}`, [...recent, Date.now()]);
+      throw new AppError(401, 'bad_code', 'Wrong or already-used code. Wait for the next one.');
+    }
+    lastStep = step;
+  }
+  setAppSetting('admin_totp_enabled', body.enabled ? '1' : '0');
+  bumpSessionEpoch();
+  res.json({ ...adminSecurityStatus(), session: body.enabled ? makeSession() : null });
 }));
 
 /** Orders Banha Outfit has to collect from stores and deliver. */
@@ -246,14 +274,15 @@ const demoPasswordsUnchanged = () => {
 
 r.get('/status', h((_req, res) => {
   const insecureJwt = config.jwtSecret.startsWith('dev-only') || config.jwtSecret.length < 24;
+  const security = adminSecurityStatus();
   res.json({
     backup: lastBackup(), backupDir: !!config.backupDir, offsite: { enabled: offsiteEnabled, last: lastOffsite() },
     whatsappConfigured: isWhatsAppConfigured(), template: config.wa.template, registrationOpen: config.allowRegister,
-    env: config.env, node: process.version, uptimeSec: Math.round(process.uptime()),
+    env: config.env, node: process.version, uptimeSec: Math.round(process.uptime()), security,
     checks: [
       { id: 'jwt', ok: !insecureJwt, label: 'JWT_SECRET قوي ومتغيّر', fix: 'اضبط JWT_SECRET بقيمة عشوائية طويلة (32+ حرف).' },
       { id: 'admin', ok: config.adminKey.length >= 16, label: 'ADMIN_KEY قوي (16+ حرف)', fix: 'اضبط ADMIN_KEY بقيمة طويلة.' },
-      { id: 'totp', ok: !!config.adminTotpSecret, label: 'تأكيد خطوتين لدخول الأدمن', fix: 'شغّل npm run admin-totp -w server واضبط ADMIN_TOTP_SECRET.' },
+      { id: 'totp', ok: security.twoStepEnabled, optional: !security.twoStepEnabled, label: security.twoStepEnabled ? 'تأكيد خطوتين لدخول الأدمن مفعّل' : 'تأكيد خطوتين لدخول الأدمن (اختياري)', fix: security.twoStepConfigured ? 'فعّله من قسم أمان الأدمن.' : 'شغّل npm run admin-totp -w server واضبط ADMIN_TOTP_SECRET، ثم فعّله من قسم أمان الأدمن.' },
       { id: 'backup', ok: !!lastBackup() && Date.now() - Date.parse(lastBackup().at) < 36 * 3600e3, label: 'نسخة احتياطية يومية (قاعدة البيانات + الصور)', fix: 'اضبط BACKUP_DIR على مجلد على قرص دائم.' },
       { id: 'offsite', ok: offsiteEnabled && !!lastOffsite() && Date.now() - Date.parse(lastOffsite().at) < 36 * 3600e3, label: 'نسخة احتياطية خارج Railway (Cloudflare R2 خاص)', fix: 'اعمل bucket خاص للنسخ واضبط BACKUP_R2_BUCKET.' },
       { id: 'demo-pw', ok: !demoPasswordsUnchanged(), label: 'باسورد حساب تاون ستايل التجريبي اتغيّر', fix: 'npm run set-password -w server -- townstyle@banhalook.app' },
@@ -264,6 +293,60 @@ r.get('/status', h((_req, res) => {
   });
 }));
 
+// Hosting/storage snapshot for admins. R2 metrics are account-wide and can lag behind recent writes.
+let r2MetricsCache = { at: 0, value: null };
+r.get('/resources', h(async (_req, res) => {
+  let disk = null;
+  let database = null;
+  try {
+    const root = path.dirname(path.resolve(config.dbFile));
+    const stat = fs.statfsSync(root);
+    const totalBytes = Number(stat.blocks) * Number(stat.bsize);
+    const freeBytes = Number(stat.bavail) * Number(stat.bsize);
+    disk = { path: root, totalBytes, freeBytes, usedBytes: Math.max(0, totalBytes - freeBytes), source: 'database-volume' };
+  } catch (error) {
+    disk = { path: path.dirname(path.resolve(config.dbFile)), error: error.message };
+  }
+  try {
+    const stat = fs.statSync(config.dbFile);
+    database = { bytes: stat.size, modifiedAt: stat.mtime.toISOString() };
+  } catch (error) {
+    database = { error: error.message };
+  }
+  const memory = process.memoryUsage();
+
+  const accountId = process.env.CF_ACCOUNT_ID || config.r2.accountId;
+  const token = process.env.CF_R2_METRICS_TOKEN || '';
+  let r2 = { configured: false, accountId: !!accountId, error: null };
+  if (accountId && token) {
+    if (!r2MetricsCache.value || Date.now() - r2MetricsCache.at > 5 * 60e3) {
+      try {
+        const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/r2/metrics`, {
+          headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000),
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) throw new Error(payload.errors?.[0]?.message || `Cloudflare API ${response.status}`);
+        const standard = payload.result?.standard?.published || {};
+        const infrequent = payload.result?.infrequentAccess?.published || {};
+        r2MetricsCache = { at: Date.now(), value: {
+          standardBytes: Number(standard.payloadSize || 0) + Number(standard.metadataSize || 0),
+          standardObjects: Number(standard.objects || 0),
+          infrequentAccessBytes: Number(infrequent.payloadSize || 0) + Number(infrequent.metadataSize || 0),
+          infrequentAccessObjects: Number(infrequent.objects || 0),
+        } };
+      } catch (error) {
+        r2 = { configured: true, accountId: true, error: error.message };
+      }
+    }
+    if (r2MetricsCache.value) r2 = { configured: true, accountId: true, ...r2MetricsCache.value, measuredAt: new Date(r2MetricsCache.at).toISOString() };
+  }
+  res.json({
+    disk, database,
+    memory: { rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, heapTotalBytes: memory.heapTotal },
+    r2, checkedAt: new Date().toISOString(),
+  });
+}));
+
 /* ---- stylist chat settings ---- */
 r.get('/stylist', h((_req, res) => res.json(stylistStatus())));
 r.put('/stylist', h((req, res) => {
@@ -271,12 +354,88 @@ r.put('/stylist', h((req, res) => {
   saveStylistSettings(b);
   res.json(stylistStatus());
 }));
+r.get('/stylist/prompts', h((_req, res) => res.json({ items: stylistStarterPrompts() })));
+const stylistPromptsBody = z.object({ items: z.array(z.object({
+  id: z.string().regex(/^[a-zA-Z0-9_-]{1,48}$/),
+  textAr: z.string().trim().min(2).max(120), textEn: z.string().trim().min(2).max(120),
+  guidance: z.string().trim().min(2).max(1400), active: z.boolean(),
+})).min(1).max(8) }).superRefine(({ items }, ctx) => {
+  if (new Set(items.map((x) => x.id)).size !== items.length) ctx.addIssue({ code: 'custom', path: ['items'], message: 'Prompt IDs must be unique.' });
+});
+r.put('/stylist/prompts', h((req, res) => {
+  const { items } = stylistPromptsBody.parse(req.body);
+  res.json({ items: saveStylistStarterPrompts(items) });
+}));
+r.get('/stylist/guide', h((_req, res) => res.json({ items: stylistStyleGuide(), sources: stylistStyleGuideSources() })));
+const stylistGuideSourceId = z.string().refine((id) => Object.hasOwn(stylistStyleGuideSources(), id), 'Unknown guide source.');
+const stylistGuideBody = z.object({ items: z.array(z.object({
+  id: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
+  titleAr: z.string().trim().min(2).max(100),
+  tags: z.array(z.string().trim().min(2).max(60)).max(16),
+  rule: z.string().trim().min(10).max(1800),
+  example: z.string().trim().max(1200).default(''),
+  avoid: z.string().trim().max(800).default(''),
+  sources: z.array(stylistGuideSourceId).max(8),
+  active: z.boolean(),
+})).max(24) }).superRefine(({ items }, ctx) => {
+  if (new Set(items.map((x) => x.id)).size !== items.length) ctx.addIssue({ code: 'custom', path: ['items'], message: 'Guide item IDs must be unique.' });
+});
+r.put('/stylist/guide', h((req, res) => {
+  const { items } = stylistGuideBody.parse(req.body);
+  res.json({ items: saveStylistStyleGuide(items), sources: stylistStyleGuideSources() });
+}));
+r.get('/stylist/training', h((_req, res) => res.json({ items: listStylistTraining() })));
+const trainingExampleBody = z.object({
+  userMessage: z.string().trim().min(2).max(700),
+  badResponse: z.string().trim().min(2).max(1200),
+  correctedResponse: z.string().trim().min(2).max(1200),
+  reason: z.string().trim().min(2).max(700),
+  topic: z.enum(['category', 'color', 'occasion', 'modest', 'fit', 'budget', 'tone', 'other']).default('other'),
+  active: z.boolean().default(true),
+});
+r.post('/stylist/training', h((req, res) => {
+  const body = trainingExampleBody.parse(req.body);
+  const id = createStylistTrainingExample(body);
+  res.status(201).json({ item: listStylistTraining().find((x) => x.id === id) });
+}));
+r.put('/stylist/training/:id', h((req, res) => {
+  const id = z.coerce.number().int().positive().parse(req.params.id);
+  const body = trainingExampleBody.parse(req.body);
+  if (!updateStylistTrainingExample(id, body)) throw new AppError(404, 'not_found', 'Training example not found.');
+  res.json({ item: listStylistTraining().find((x) => x.id === id) });
+}));
+r.patch('/stylist/training/:id', h((req, res) => {
+  const id = z.coerce.number().int().positive().parse(req.params.id);
+  const { active } = z.object({ active: z.boolean() }).parse(req.body);
+  if (!setStylistTrainingExampleActive(id, active)) throw new AppError(404, 'not_found', 'Training example not found.');
+  res.json({ item: listStylistTraining().find((x) => x.id === id) });
+}));
+r.delete('/stylist/training/:id', h((req, res) => {
+  const id = z.coerce.number().int().positive().parse(req.params.id);
+  if (!deleteStylistTrainingExample(id)) throw new AppError(404, 'not_found', 'Training example not found.');
+  res.json({ ok: true });
+}));
+r.get('/stylist/feedback', h((_req, res) => res.json({ items: listStylistFeedback() })));
+r.patch('/stylist/feedback/:id', h((req, res) => {
+  const id = z.coerce.number().int().positive().parse(req.params.id);
+  z.object({ status: z.literal('dismissed') }).parse(req.body);
+  if (!dismissStylistFeedback(id)) throw new AppError(404, 'not_found', 'Pending feedback not found.');
+  res.json({ ok: true });
+}));
+r.post('/stylist/feedback/:id/train', h((req, res) => {
+  const id = z.coerce.number().int().positive().parse(req.params.id);
+  const body = z.object({ userMessage: z.string().trim().min(2).max(700), badResponse: z.string().trim().min(2).max(1200), correctedResponse: z.string().trim().min(2).max(1200), reason: z.string().trim().min(2).max(700), topic: z.enum(['category', 'color', 'occasion', 'modest', 'fit', 'budget', 'tone', 'other']).default('other'), active: z.boolean().default(true) }).parse(req.body);
+  const trainingId = trainFromStylistFeedback(id, body);
+  if (!trainingId) throw new AppError(404, 'not_found', 'Pending feedback not found.');
+  res.status(201).json({ ok: true, trainingId });
+}));
 
 /* ---- visual search settings (on/off, model, free daily quota) ---- */
 r.get('/visual', h((_req, res) => res.json(visualStatus())));
 r.put('/visual', h((req, res) => {
-  const body = z.object({ enabled: z.boolean().optional(), model: z.enum(['color', 'clip', 'jina', 'cloudflare']).optional(), dailyFree: z.coerce.number().int().min(0).max(1000).optional() }).parse(req.body);
+  const body = z.object({ enabled: z.boolean().optional(), model: z.enum(['color', 'cloudflare']).optional(), dailyFree: z.coerce.number().int().min(0).max(1000).optional() }).parse(req.body);
   saveVisualSettings(body);
+  if (body.model) triggerReindex(0);
   res.json(visualStatus());
 }));
 

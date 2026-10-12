@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { X, Send, Mic, MicOff, Loader2, Camera, Volume2, VolumeX } from 'lucide-react';
+import { X, Send, Mic, MicOff, Loader2, Camera, ThumbsDown } from 'lucide-react';
 import { useI18n } from '../../lib/i18n.jsx';
 import { useApi } from '../../lib/hooks.js';
 import { formatMoney } from '../../lib/format.js';
@@ -9,14 +9,6 @@ import { errorMessage } from '../ui/States.jsx';
 import { cx } from '../ui/cx.js';
 
 const store = { get: (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } }, set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } } };
-const TTS = typeof window !== 'undefined' && 'speechSynthesis' in window ? window.speechSynthesis : null;
-const speak = (txt, lang, onState) => {
-  if (!TTS || !txt) return;
-  TTS.cancel(); const u = new SpeechSynthesisUtterance(txt.replace(/[\u{1F300}-\u{1FAFF}\u2600-\u27BF]/gu, ''));
-  u.lang = lang === 'ar' ? 'ar-EG' : 'en-US';
-  const v = TTS.getVoices().find((x) => x.lang?.toLowerCase().startsWith(lang === 'ar' ? 'ar' : 'en')); if (v) u.voice = v;
-  u.rate = 1; u.onstart = () => onState?.(true); u.onend = () => onState?.(false); u.onerror = () => onState?.(false); TTS.speak(u);
-};
 /** shrink a photo to ~768px JPEG so the upload stays small */
 const shrink = (file) => new Promise((resolve, reject) => {
   const img = new Image(); const url = URL.createObjectURL(file);
@@ -35,14 +27,14 @@ export default function StylistChat() {
   const [msgs, setMsgs] = useState([]);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [feedbackBusy, setFeedbackBusy] = useState({});
+  const [feedbackSent, setFeedbackSent] = useState({});
   const [listening, setListening] = useState(false);
   const rec = useRef(null);
   const fileRef = useRef(null);
   const [photo, setPhoto] = useState(null);
   const [photo2, setPhoto2] = useState(null); // a second photo = "compare these two"
-  const [talking, setTalking] = useState(false);
   const [similar, setSimilar] = useState(false);
-  const [voiceOn, setVoiceOn] = useState(() => store.get('moda.voice', false));
   const [profile, setProfile] = useState(() => store.get('moda.profile', {}));
   const end = useRef(null);
   const sendRef = useRef(null);
@@ -52,10 +44,32 @@ export default function StylistChat() {
     window.addEventListener('moda:open', on); return () => window.removeEventListener('moda:open', on);
   }, []);
   useEffect(() => { end.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [msgs, busy, open]);
-  useEffect(() => { if (!open) { rec.current?.stop?.(); TTS?.cancel(); setTalking(false); } }, [open]);
+  useEffect(() => {
+    // Clear any speech already in progress and disable the old saved read-aloud preference.
+    window.speechSynthesis?.cancel?.();
+    store.set('moda.voice', false);
+  }, []);
+  useEffect(() => { if (!open) rec.current?.stop?.(); }, [open]);
   if (!feat || feat.features?.stylist === false) return null;
 
-  const send = async (raw) => {
+  const reportStylistReply = async (index) => {
+    const reply = msgs[index];
+    let prompt = null;
+    for (let i = index - 1; i >= 0; i--) if (msgs[i].role === 'user') { prompt = msgs[i]; break; }
+    if (!reply || !prompt || feedbackBusy[index] || feedbackSent[index]) return;
+    setFeedbackBusy((s) => ({ ...s, [index]: true }));
+    try {
+      const userMessage = `${prompt.content || '(رسالة بدون نص)'}${prompt.photo ? (prompt.photo2 ? ' [العميل أرفق صورتين للمقارنة؛ لم يتم حفظ الصور]' : ' [العميل أرفق صورة؛ لم يتم حفظ الصورة]') : ''}`;
+      const productIds = [...new Set((reply.looks || []).flatMap((look) => (look.items || []).map((p) => p.id)))].slice(0, 24);
+      const res = await fetch('/api/stylist/feedback', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userMessage, assistantResponse: [reply.say, reply.tips].filter(Boolean).join('\n') || '(لمودة لم تكتب رداً نصياً)', productIds }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error?.message || 'تعذر إرسال الملاحظة');
+      setFeedbackSent((s) => ({ ...s, [index]: true }));
+    } catch (e) { window.alert(e.message || 'تعذر إرسال الملاحظة'); }
+    setFeedbackBusy((s) => ({ ...s, [index]: false }));
+  };
+
+  const send = async (raw, starterPromptId) => {
     const content = String(raw ?? text).trim();
     if ((!content && !photo) || busy) return;
     const image = photo; const image2 = photo2; const shown = content || (image2 ? t('stylist.compareMsg') : similar ? t('stylist.similarMsg') : t('stylist.photoMsg')); setSimilar(false);
@@ -63,6 +77,7 @@ export default function StylistChat() {
     setMsgs(next); setText(''); setPhoto(null); setPhoto2(null); setBusy(true);
     try {
       const body = { messages: next.map((m) => ({ role: m.role, content: m.role === 'assistant' ? (m.say || m.content || '') : m.content })).filter((m) => m.content), profile };
+      if (starterPromptId) body.starterPromptId = starterPromptId;
       if (image) body.image = image;
       if (image && image2) body.image2 = image2;
       const res = await fetch('/api/stylist', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -70,7 +85,6 @@ export default function StylistChat() {
       if (!res.ok) throw Object.assign(new Error('x'), { code: data?.error?.code });
       setMsgs([...next, { role: 'assistant', ...data }]);
       if (data.remember && Object.keys(data.remember).length) { const p = { ...profile, ...data.remember }; setProfile(p); store.set('moda.profile', p); }
-      if (voiceOn) speak([data.say, data.tips].filter(Boolean).join('. '), lang, setTalking);
     } catch (e) { setMsgs([...next, { role: 'assistant', error: errorMessage(t, e) }]); }
     setBusy(false);
   };
@@ -86,8 +100,9 @@ export default function StylistChat() {
   };
 
   const pick = async (e) => { const f = e.target.files?.[0]; e.target.value = ''; if (!f) return; try { const s = await shrink(f); if (photo && !photo2) setPhoto2(s); else if (photo) setPhoto2(s); else setPhoto(s); } catch { /* ignore */ } };
-  const toggleVoice = () => { const v = !voiceOn; setVoiceOn(v); store.set('moda.voice', v); if (!v) { TTS?.cancel(); setTalking(false); } };
-  const chips = [t('stylist.chip1'), t('stylist.chip2'), t('stylist.chip3')];
+  const chips = Array.isArray(feat.features?.stylistPrompts)
+    ? feat.features.stylistPrompts.map((p) => ({ id: p.id, text: lang === 'en' ? p.textEn : p.textAr }))
+    : [t('stylist.chip1'), t('stylist.chip2'), t('stylist.chip3')].map((text) => ({ id: '', text }));
   return (
     <>
       {!open && (
@@ -101,10 +116,9 @@ export default function StylistChat() {
           <button type="button" className="absolute inset-0 bg-black/40 sm:hidden" aria-label="close" onClick={() => setOpen(false)} />
           <div className="absolute inset-x-0 bottom-0 flex h-[92dvh] flex-col overflow-hidden rounded-t-3xl border border-line bg-canvas shadow-lift sm:static sm:h-full sm:rounded-3xl">
             <header className="flex items-center justify-between gap-3 border-b border-line bg-elevated px-4 py-3">
-              <div className="flex items-center gap-3"><ModaAvatar src={avatar} size={44} talking={talking} thinking={busy} />
+              <div className="flex items-center gap-3"><ModaAvatar src={avatar} thinking={busy} />
                 <div><p className="font-display text-base font-bold leading-tight">{name}</p><p className="text-[12px] text-muted">{t('stylist.sub')}</p></div></div>
               <div className="flex items-center gap-1">
-                {TTS && <button type="button" onClick={toggleVoice} aria-pressed={voiceOn} aria-label={t('stylist.voice')} className={cx('grid h-9 w-9 place-items-center rounded-full hover:bg-secondary', voiceOn && 'text-brand')}>{voiceOn ? <Volume2 className="h-5 w-5" /> : <VolumeX className="h-5 w-5" />}</button>}
                 <button type="button" onClick={() => setOpen(false)} aria-label="close" className="grid h-9 w-9 place-items-center rounded-full hover:bg-secondary"><X className="h-5 w-5" /></button>
               </div>
             </header>
@@ -112,9 +126,9 @@ export default function StylistChat() {
             <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
               {!msgs.length && (
                 <div>
-                  <div className="mb-3 grid place-items-center"><ModaAvatar src={avatar} size={230} talking={talking} thinking={busy} tilt living /></div>
+                  <div className="mb-3 grid place-items-center"><ModaAvatar src={avatar} size={230} thinking={busy} tilt living /></div>
                   <div className="flex items-end gap-2"><div className="max-w-[92%] rounded-2xl rounded-ss-sm bg-secondary px-3.5 py-2.5 text-[14.5px] leading-relaxed">{t('stylist.hello', { n: name })}</div></div>
-                  <div className="mt-3 flex flex-wrap gap-2">{chips.map((c) => <button key={c} type="button" onClick={() => send(c)} className="rounded-full border border-line-strong bg-elevated px-3.5 py-2 text-[13px] font-medium transition hover:border-fg">{c}</button>)}</div>
+                  <div className="mt-3 flex flex-wrap gap-2">{chips.map((c) => <button key={c.id || c.text} type="button" onClick={() => send(c.text, c.id)} className="rounded-full border border-line-strong bg-elevated px-3.5 py-2 text-[13px] font-medium transition hover:border-fg">{c.text}</button>)}</div>
                 </div>
               )}
               {msgs.map((m, i) => m.role === 'user' ? (
@@ -125,6 +139,7 @@ export default function StylistChat() {
                   <LookSet data={m} name={name} />
                   {m.intent === 'shop' && m.missing?.length > 0 && <p className="mt-1 text-[12.5px] text-muted">{t('stylist.missing', { x: m.missing.join('، ') })}</p>}
                   {m.intent === 'shop' && !m.looks?.length && !m.error && <p className="mt-2 text-[13px] text-muted">{t('stylist.none')}</p>}
+                  {(m.say || m.looks?.length) && !m.error && <div className="mt-1 max-w-[90%]">{feedbackSent[i] ? <p role="status" className="px-2 text-[12px] text-muted">وصلتنا ملاحظتك، شكرًا.</p> : <button type="button" disabled={feedbackBusy[i]} onClick={() => reportStylistReply(i)} title="هيتبعت السؤال ورد مودة لفريق الموقع للمراجعة؛ الصور نفسها مش بتتبعت" className="inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[12px] text-muted transition hover:bg-secondary hover:text-fg disabled:opacity-50"><ThumbsDown className="h-3.5 w-3.5" />{feedbackBusy[i] ? 'بيتبعت…' : 'الرد مش مناسب'}</button>}</div>}
                 </div>
               ))}
               {busy && <div className="flex items-center gap-2 text-sm text-muted"><Loader2 className="h-4 w-4 animate-spin" />{t('stylist.thinking')}</div>}

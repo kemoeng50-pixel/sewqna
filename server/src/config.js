@@ -28,7 +28,7 @@ export const config = {
   // The public demo account (ahmed@…): always read-only, so "Try the dashboard" can never change a real store or the site.
   demoEmail: (process.env.DEMO_EMAIL || 'ahmed@banhalook.app').toLowerCase(),
   adminKey: process.env.ADMIN_KEY || '',
-  // Optional two-step confirmation for /admin: a base32 secret (generate with `npm run admin-totp -w server`). When set, the key alone is not enough.
+  // Optional admin two-step confirmation. Set the secret, then enable it from /admin/system.
   adminTotpSecret: (process.env.ADMIN_TOTP_SECRET || '').replace(/\s/g, ''),
   // Daily backup (database + photos). Set BACKUP_DIR to a folder on a persistent disk / synced drive. BACKUP_KEEP_DAYS = how many daily DB copies to keep.
   backupDir: process.env.BACKUP_DIR || '',
